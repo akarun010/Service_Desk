@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ServiceDesk</title>
+<style>
+  body{font-family:system-ui,sans-serif;margin:0;background:#f5f6fa;color:#222}
+  header{background:#1f2937;color:#fff;padding:12px 20px;display:flex;justify-content:space-between;align-items:center}
+  main{max-width:900px;margin:20px auto;padding:0 16px}
+  .card{background:#fff;border-radius:8px;padding:16px;margin-bottom:16px;box-shadow:0 1px 3px #0002}
+  input,textarea,select,button{font:inherit;padding:8px;margin:4px 0}
+  input,textarea{width:100%;box-sizing:border-box}
+  button{cursor:pointer;background:#2563eb;color:#fff;border:0;border-radius:6px;padding:8px 14px}
+  button.link{background:none;color:#2563eb;padding:0}
+  button.ghost{background:#e5e7eb;color:#111}
+  .badge{padding:2px 8px;border-radius:10px;font-size:12px;background:#e5e7eb}
+  .row{display:flex;justify-content:space-between;gap:8px;align-items:center}
+  .ticket{border-bottom:1px solid #eee;padding:8px 0;cursor:pointer}
+  .hidden{display:none}
+  .err{color:#b91c1c}
+  .muted{color:#6b7280;font-size:13px}
+</style>
+</head>
+<body>
+<header><b>ServiceDesk</b><span id="who"></span></header>
+<main>
+  <div id="auth" class="card">
+    <h3>Sign in</h3>
+    <input id="fullName" placeholder="Full name (register only)">
+    <input id="email" placeholder="Email">
+    <input id="password" type="password" placeholder="Password (min 8 chars)">
+    <button onclick="login()">Login</button>
+    <button class="ghost" onclick="register()">Register</button>
+    <p id="authErr" class="err"></p>
+    <p class="muted">Dev accounts: agent@servicedesk.local / Agent@123, admin@servicedesk.local / Admin@123</p>
+  </div>
+
+  <div id="app" class="hidden">
+    <div id="stats" class="card hidden"></div>
+    <div class="card">
+      <h3>New ticket</h3>
+      <input id="title" placeholder="Title">
+      <textarea id="desc" rows="3" placeholder="Describe the problem"></textarea>
+      <select id="prio"><option>LOW</option><option selected>MEDIUM</option><option>HIGH</option></select>
+      <button onclick="createTicket()">Submit</button>
+      <span id="createErr" class="err"></span>
+    </div>
+    <div class="card">
+      <div class="row"><h3>Tickets</h3>
+        <select id="filter" onchange="loadTickets()">
+          <option value="">All</option><option>OPEN</option><option>IN_PROGRESS</option>
+          <option>RESOLVED</option><option>CLOSED</option>
+        </select>
+      </div>
+      <div id="list"></div>
+    </div>
+    <div id="detail" class="card hidden"></div>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let token = localStorage.getItem('token');
+let me = JSON.parse(localStorage.getItem('me') || 'null');
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const isStaff = () => me && me.role !== 'USER';
+
+async function api(path, opts = {}) {
+  const headers = {...(opts.headers || {})};
+  if (token) headers.Authorization = 'Bearer ' + token;
+  if (opts.body && !(opts.body instanceof FormData)) headers['Content-Type'] = 'application/json';
+  const res = await fetch('/api' + path, {...opts, headers});
+  if (res.status === 401 && token) { logout(); throw new Error('Session expired, please sign in again'); }
+  if (!res.ok) {
+    let msg = res.statusText;
+    try { msg = (await res.json()).message || msg; } catch {}
+    throw new Error(msg);
+  }
+  return res.json();
+}
+
+function setSession(data) {
+  token = data.token; me = data;
+  localStorage.setItem('token', token);
+  localStorage.setItem('me', JSON.stringify(me));
+  render();
+}
+function logout() {
+  token = null; me = null;
+  localStorage.clear();
+  render();
+}
+async function login() {
+  try {
+    setSession(await api('/auth/login', {method:'POST', body: JSON.stringify({email: $('email').value, password: $('password').value})}));
+  } catch (e) { $('authErr').textContent = e.message; }
+}
+async function register() {
+  try {
+    setSession(await api('/auth/register', {method:'POST', body: JSON.stringify({fullName: $('fullName').value, email: $('email').value, password: $('password').value})}));
+  } catch (e) { $('authErr').textContent = e.message; }
+}
+
+function render() {
+  $('auth').classList.toggle('hidden', !!token);
+  $('app').classList.toggle('hidden', !token);
+  $('who').innerHTML = me ? `${esc(me.fullName)} (${esc(me.role)}) <button class="link" style="color:#fff" onclick="logout()">logout</button>` : '';
+  if (token) { loadTickets(); loadStats(); }
+}
+
+async function loadStats() {
+  const box = $('stats');
+  if (!isStaff()) { box.classList.add('hidden'); return; }
+  try {
+    const s = await api('/tickets/stats');
+    box.innerHTML = '<b>Overview:</b> ' + Object.entries(s).map(([k, v]) => `<span class="badge">${esc(k)}: ${v}</span>`).join(' ');
+    box.classList.remove('hidden');
+  } catch { box.classList.add('hidden'); }
+}
+
+async function loadTickets() {
+  const f = $('filter').value;
+  try {
+    const page = await api('/tickets?size=20' + (f ? '&status=' + f : ''));
+    $('list').innerHTML = page.content.length ? page.content.map(t =>
+      `<div class="ticket" onclick="openTicket(${t.id})"><div class="row"><b>#${t.id} ${esc(t.title)}</b>
+       <span><span class="badge">${esc(t.priority)}</span> <span class="badge">${esc(t.status)}</span></span></div>
+       <div class="muted">by ${esc(t.createdBy)}${t.assignee ? ' · assigned to ' + esc(t.assignee) : ''}</div></div>`).join('')
+      : '<p class="muted">No tickets yet.</p>';
+  } catch (e) { $('list').innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+}
+
+async function createTicket() {
+  try {
+    await api('/tickets', {method:'POST', body: JSON.stringify({title: $('title').value, description: $('desc').value, priority: $('prio').value})});
+    $('title').value = ''; $('desc').value = ''; $('createErr').textContent = '';
+    loadTickets(); loadStats();
+  } catch (e) { $('createErr').textContent = e.message; }
+}
+
+async function openTicket(id) {
+  const [t, comments, files] = await Promise.all([api('/tickets/' + id), api(`/tickets/${id}/comments`), api(`/tickets/${id}/attachments`)]);
+  const statusSelect = isStaff()
+    ? `<select onchange="changeStatus(${id}, this.value)">${['OPEN','IN_PROGRESS','RESOLVED','CLOSED'].map(s => `<option ${s === t.status ? 'selected' : ''}>${s}</option>`).join('')}</select>`
+    : `<span class="badge">${esc(t.status)}</span>`;
+  $('detail').innerHTML = `
+    <div class="row"><h3>#${t.id} ${esc(t.title)}</h3>${statusSelect}</div>
+    <p>${esc(t.description)}</p>
+    <h4>Attachments</h4>
+    ${files.map(f => `<div><button class="link dl" data-id="${f.id}" data-name="${esc(f.fileName)}">${esc(f.fileName)}</button> <span class="muted">${f.sizeBytes} bytes</span></div>`).join('') || '<p class="muted">None</p>'}
+    <input type="file" id="file"> <button class="ghost" onclick="upload(${id})">Upload</button>
+    <h4>Comments</h4>
+    ${comments.map(c => `<p><b>${esc(c.author)}</b>: ${esc(c.body)}</p>`).join('') || '<p class="muted">No comments</p>'}
+    <input id="comment" placeholder="Write a comment"> <button onclick="addComment(${id})">Send</button>
+    <p id="detailErr" class="err"></p>`;
+  $('detail').classList.remove('hidden');
+  document.querySelectorAll('.dl').forEach(b => b.onclick = () => download(b.dataset.id, b.dataset.name));
+}
+
+async function changeStatus(id, status) {
+  await api(`/tickets/${id}/status`, {method:'PATCH', body: JSON.stringify({status})});
+  loadTickets(); loadStats();
+}
+async function addComment(id) {
+  try { await api(`/tickets/${id}/comments`, {method:'POST', body: JSON.stringify({body: $('comment').value})}); openTicket(id); }
+  catch (e) { $('detailErr').textContent = e.message; }
+}
+async function upload(id) {
+  const file = $('file').files[0];
+  if (!file) return;
+  const fd = new FormData(); fd.append('file', file);
+  try { await api(`/tickets/${id}/attachments`, {method:'POST', body: fd}); openTicket(id); }
+  catch (e) { $('detailErr').textContent = e.message; }
+}
+async function download(id, name) {
+  const res = await fetch(`/api/attachments/${id}/download`, {headers: {Authorization: 'Bearer ' + token}});
+  if (!res.ok) { $('detailErr').textContent = 'Download failed'; return; }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(await res.blob()); a.download = name; a.click();
+}
+
+render();
+</script>
+</body>
+</html>
